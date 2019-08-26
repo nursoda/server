@@ -1205,7 +1205,7 @@ steps:
   commands:
     - ./occ maintenance:install --admin-pass=admin --data-dir=/dev/shm/nc_int
     - cd build/integration
-    - ./run.sh features/sharing-v1.feature
+    - ./run.sh sharing-features/sharing-v1.feature
 
 trigger:
   branch:
@@ -1229,7 +1229,7 @@ steps:
   commands:
     - ./occ maintenance:install --admin-pass=admin --data-dir=/dev/shm/nc_int
     - cd build/integration
-    - ./run.sh features/sharing-v1-part2.feature
+    - ./run.sh sharing-features/sharing-v1-part2.feature
 
 trigger:
   branch:
@@ -1253,7 +1253,7 @@ steps:
   commands:
     - ./occ maintenance:install --admin-pass=admin --data-dir=/dev/shm/nc_int
     - cd build/integration
-    - ./run.sh features/sharing-v1-part3.feature
+    - ./run.sh sharing-features/sharing-v1-part3.feature
 
 trigger:
   branch:

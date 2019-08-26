@@ -335,19 +335,21 @@ class ShareAPIController extends OCSController {
 		try {
 			$this->lock($share->getNode());
 		} catch (LockedException $e) {
-			throw new OCSNotFoundException($this->l->t('could not delete share'));
-		}
-
-		if (!$this->canAccessShare($share)) {
 			throw new OCSNotFoundException($this->l->t('Could not delete share'));
 		}
 
-		if (($share->getShareType() === Share::SHARE_TYPE_GROUP ||
-				$share->getShareType() === Share::SHARE_TYPE_ROOM) &&
-			$share->getShareOwner() !== $this->currentUser &&
-			$share->getSharedBy() !== $this->currentUser) {
+
+		// if it's a group share or a room share
+		// we don't delete the share, but only the
+		// mount point. Allowing it to be restored
+		// from the deleted shares
+		if ($this->canDeleteShareFromSelf($share)) {
 			$this->shareManager->deleteFromSelf($share, $this->currentUser);
 		} else {
+			if (!$this->canDeleteShare($share)) {
+				throw new OCSNotFoundException($this->l->t('Wrong share ID, share doesn\'t exist'));
+			}
+
 			$this->shareManager->deleteShare($share);
 		}
 
@@ -824,12 +826,8 @@ class ShareAPIController extends OCSController {
 
 		$this->lock($share->getNode());
 
-		if (!$this->canAccessShare($share, false)) {
+		if (!$this->canEditShare($share)) {
 			throw new OCSNotFoundException($this->l->t('Wrong share ID, share doesn\'t exist'));
-		}
-
-		if ($share->getShareOwner() !== $this->currentUser && $share->getSharedBy() !== $this->currentUser) {
-			throw new OCSForbiddenException('You are not allowed to edit incoming shares');
 		}
 
 		if ($permissions === null &&
@@ -989,37 +987,38 @@ class ShareAPIController extends OCSController {
 	 * Does the user have read permission on the share
 	 *
 	 * @param \OCP\Share\IShare $share the share to check
-	 * @param boolean $checkGroups check groups as well?
 	 * @return boolean
+	 * @throws NotFoundException
 	 *
 	 * @suppress PhanUndeclaredClassMethod
 	 */
-	protected function canAccessShare(\OCP\Share\IShare $share, bool $checkGroups = true): bool {
+	protected function canAccessShare(\OCP\Share\IShare $share): bool {
 		// A file with permissions 0 can't be accessed by us. So Don't show it
 		if ($share->getPermissions() === 0) {
 			return false;
 		}
 
-		// Owner of the file and the sharer of the file can always get share
-		if ($share->getShareOwner() === $this->currentUser ||
-			$share->getSharedBy() === $this->currentUser
-		) {
+		// If the user can edit the share, the user can read it!
+		if ($this->canEditShare($share)) {
+			return true;
+		}
+		
+		// If the share is shared with you, you can access it!
+		if ($share->getShareType() === Share::SHARE_TYPE_USER
+			&& $share->getSharedWith() === $this->currentUser) {
 			return true;
 		}
 
-		// If the share is shared with you (or a group you are a member of)
-		if ($share->getShareType() === Share::SHARE_TYPE_USER &&
-			$share->getSharedWith() === $this->currentUser
-		) {
+		// Have reshare rights on the shared file/folder ?
+		// Does the currentUser have access to the shared file?
+		$userFolder = $this->rootFolder->getUserFolder($this->currentUser);
+		$files = $userFolder->getById($share->getNodeId());
+		if (!empty($files) && $this->shareProviderResharingRights($this->currentUser, $share, $files[0])) {
 			return true;
 		}
 
-		// Have reshare rights ?
-		if ($this->shareProviderResharingRights($this->currentUser, $share, $share->getNode())) {
-			return true;
-		}
-
-		if ($checkGroups && $share->getShareType() === Share::SHARE_TYPE_GROUP) {
+		// If in the recipient group, you can see the share
+		if ($share->getShareType() === Share::SHARE_TYPE_GROUP) {
 			$sharedWith = $this->groupManager->get($share->getSharedWith());
 			$user = $this->userManager->get($this->currentUser);
 			if ($user !== null && $sharedWith !== null && $sharedWith->inGroup($user)) {
@@ -1030,6 +1029,97 @@ class ShareAPIController extends OCSController {
 		if ($share->getShareType() === Share::SHARE_TYPE_CIRCLE) {
 			// TODO: have a sanity check like above?
 			return true;
+		}
+
+		if ($share->getShareType() === Share::SHARE_TYPE_ROOM) {
+			try {
+				return $this->getRoomShareHelper()->canAccessShare($share, $this->currentUser);
+			} catch (QueryException $e) {
+				return false;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Does the user have edit permission on the share
+	 *
+	 * @param \OCP\Share\IShare $share the share to check
+	 * @return boolean
+	 *
+	 * @suppress PhanUndeclaredClassMethod
+	 */
+	protected function canEditShare(\OCP\Share\IShare $share): bool {
+		// A file with permissions 0 can't be accessed by us. So Don't show it
+		if ($share->getPermissions() === 0) {
+			return false;
+		}
+
+		// The owner of the file and the creator of the share
+		// can always edit the share
+		if ($share->getShareOwner() === $this->currentUser ||
+			$share->getSharedBy() === $this->currentUser
+		) {
+			return true;
+		}
+
+		//! we do NOT support some kind of `admin` in groups.
+		//! You cannot edit shares shared to a group you're
+		//! a member of if you're not the share owner or the file owner!
+
+		return false;
+	}
+
+	/**
+	 * Does the user have delete permission on the share
+	 *
+	 * @param \OCP\Share\IShare $share the share to check
+	 * @return boolean
+	 *
+	 * @suppress PhanUndeclaredClassMethod
+	 */
+	protected function canDeleteShare(\OCP\Share\IShare $share): bool {
+		// A file with permissions 0 can't be accessed by us. So Don't show it
+		if ($share->getPermissions() === 0) {
+			return false;
+		}
+
+		// if the user is the recipient, i can unshare
+		// the share with self
+		if ($share->getShareType() === Share::SHARE_TYPE_USER
+			&& $share->getSharedWith() === $this->currentUser) {
+			return true;
+		}
+
+		// if EDIT rights to a share, you can delete it
+		if ($this->canEditShare($share)) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Does the user have delete permission on the share
+	 * This differs from the canDeleteShare function as it only
+	 * remove the share for the current user. It does NOT
+	 * completely delete the share but only the mount point.
+	 * It can then be restored from the deleted shares section.
+	 *
+	 * @param \OCP\Share\IShare $share the share to check
+	 * @return boolean
+	 *
+	 * @suppress PhanUndeclaredClassMethod
+	 */
+	protected function canDeleteShareFromSelf(\OCP\Share\IShare $share): bool {
+		// If in the recipient group, you can delete the share from self
+		if ($share->getShareType() === Share::SHARE_TYPE_GROUP) {
+			$sharedWith = $this->groupManager->get($share->getSharedWith());
+			$user = $this->userManager->get($this->currentUser);
+			if ($user !== null && $sharedWith !== null && $sharedWith->inGroup($user)) {
+				return true;
+			}
 		}
 
 		if ($share->getShareType() === Share::SHARE_TYPE_ROOM) {
